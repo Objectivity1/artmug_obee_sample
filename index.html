@@ -1,0 +1,356 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>GIF Galleries (fast tabs + cache)</title>
+<link rel="preconnect" href="https://api.github.com">
+<style>
+  html,body{overscroll-behavior-y:none}
+  body{font-family:system-ui,-apple-system,Segoe UI,Roboto,'Noto Sans KR','Malgun Gothic',Helvetica,Arial,sans-serif;margin:0}
+  #amg{max-width:1000px;margin:24px auto;padding:16px}
+  .tabs{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px;justify-content:center}
+  .tab{border:1px solid #ddd;background:#fafafa;border-radius:999px;padding:8px 14px;cursor:pointer;user-select:none}
+  .tab.active{background:#1d4ed8;color:#fff;border-color:#1d4ed8}
+  .stage{position:relative;border:1px solid #eee;height:450px;border-radius:12px;padding:12px;display:flex;align-items:center;justify-content:center;text-align:center}
+  #amg_main{max-width:100%;max-height:100%;width:auto;height:auto;display:inline-block;border-radius:8px;pointer-events:none;object-fit:contain}
+  .nav{position:absolute;top:50%;transform:translateY(-50%);width:40px;height:40px;border-radius:999px;border:0;background:rgba(0,0,0,.45);color:#fff;font-size:20px;cursor:pointer;z-index:10;display:flex;align-items:center;justify-content:center}
+  #amg_prev{left:8px} #amg_next{right:8px}
+  #amg_strip{margin-top:10px;display:flex;gap:10px;overflow-x:auto;-webkit-overflow-scrolling:touch;padding:6px 2px;overscroll-behavior:contain;touch-action:pan-x;scrollbar-gutter:stable both-edges}
+  .amg_th{flex:0 0 calc((100% - 7*10px)/8);border:2px solid #ddd;border-radius:8px;padding:0;background:#fff;cursor:pointer;outline:none}
+  .amg_th img{display:block;width:100%;height:100px;object-fit:cover;border-radius:6px;pointer-events:none}
+  .amg_th.active{border-color:#7aa7ff}
+  .empty{color:#888;text-align:center;padding:20px 0}
+  .sentinel{flex:0 0 1px;width:1px;height:1px}
+#amg_main,
+#amg_strip img {
+  -webkit-user-drag: none;
+  user-drag: none;
+  -webkit-touch-callout: none; /* iOS 길게 누르기 메뉴 막기 */
+  user-select: none;
+}
+
+</style>
+</head>
+<body>
+<div id="amg" oncontextmenu="return false">
+  <div class="tabs" id="tabs"></div>
+
+  <div class="stage">
+    <img id="amg_main" alt="미리보기" fetchpriority="high" decoding="async">
+    <button id="amg_prev" class="nav" type="button" aria-label="이전">‹</button>
+    <button id="amg_next" class="nav" type="button" aria-label="다음">›</button>
+  </div>
+
+  <div id="amg_strip"></div>
+
+</div>
+
+<script>
+(() => {
+  // 탭/폴더
+  const GALLERIES = [
+    { label:'A-1타입', dir:'A-1images' },
+    { label:'A-2타입', dir:'A-2images' },
+    { label:'B타입',   dir:'Bimages'   }
+  ];
+  const OWNER='Objectivity1', REPO='artmug_obee', BRANCH='main';
+
+  // 튜닝 파라미터
+  const MAX_PER_DIR = 60;
+  const BATCH = 8;               // 초기/추가 썸네일 개수 → 작을수록 초기 렉↓
+  const PREFETCH_NEIGHBOR = 1;   // 메인 양옆 프리로드 개수(1 추천)
+
+  // DOM
+  const tabsEl=document.getElementById('tabs');
+  const main=document.getElementById('amg_main');
+  const prev=document.getElementById('amg_prev');
+  const next=document.getElementById('amg_next');
+  const strip=document.getElementById('amg_strip');
+
+  // 캐시 (메모리 + localStorage)
+  const memCache=new Map(); // dir -> { list, etag, time }
+  const LS_KEY='amg_manifest_v1';
+
+  function loadLS(){
+    try{ return JSON.parse(localStorage.getItem(LS_KEY)||'{}'); }catch{ return {}; }
+  }
+  function saveLS(obj){
+    try{ localStorage.setItem(LS_KEY, JSON.stringify(obj)); }catch{}
+  }
+
+  function numKey(name){
+    const m = name.match(/(\d+)/);
+    return m ? parseInt(m[1],10) : Number.POSITIVE_INFINITY;
+  }
+
+  async function listViaGithubAPI(dir){
+    const url=`https://api.github.com/repos/${OWNER}/${REPO}/contents/${encodeURIComponent(dir)}?ref=${encodeURIComponent(BRANCH)}`;
+    const res=await fetch(url, {headers:{'Accept':'application/vnd.github+json'}});
+    if(!res.ok) throw new Error('api_fail_'+res.status);
+    const etag = res.headers.get('etag') || '';
+    const data=await res.json();
+    const list=data.filter(it=>it.type==='file' && /\.gif$/i.test(it.name))
+                   .sort((a,b)=> numKey(a.name)-numKey(b.name))
+                   .slice(0,MAX_PER_DIR)
+                   .map(it=>`${dir}/${it.name}`);
+    return { list, etag };
+  }
+
+  async function listByProbe(dir, maxTry=MAX_PER_DIR){
+    const out=[];
+    // 전수검사(조기 종료 없음): 캐시 미스일 때도 느리지 않도록 HEAD는 병렬 N개로 제한
+    const CONC=8;
+    let i=1;
+    async function worker(){
+      while(i<=maxTry){
+        const n=i++;
+        const p=`${dir}/${n}.gif`;
+        try{
+          const r=await fetch(p,{method:'HEAD', cache:'no-cache'});
+          if(r.ok) out.push(p);
+        }catch(_){}
+      }
+    }
+    await Promise.all(Array.from({length:CONC}, worker));
+    return out;
+  }
+
+  async function getImages(dir){
+    // 1) 메모리 캐시
+    if(memCache.has(dir)) return memCache.get(dir).list;
+
+    // 2) localStorage 캐시 우선 사용 → 즉시 표시 → 백그라운드 최신화
+    const ls = loadLS();
+    const entry = ls[dir];
+    if(entry && Array.isArray(entry.list) && entry.list.length){
+      // 백그라운드 최신화(실패해도 무시)
+      refreshInBG(dir, entry.etag).catch(()=>{});
+      memCache.set(dir, { list: entry.list, etag: entry.etag, time: Date.now() });
+      return entry.list;
+    }
+
+    // 3) API 시도
+    try{
+      const { list, etag } = await listViaGithubAPI(dir);
+      if(list.length){
+        memCache.set(dir,{list,etag,time:Date.now()});
+        ls[dir]={list,etag}; saveLS(ls);
+        return list;
+      }
+      // API가 리스트 0개면 폴백
+      const fb = await listByProbe(dir);
+      memCache.set(dir,{list:fb,etag:'',time:Date.now()});
+      ls[dir]={list:fb,etag:''}; saveLS(ls);
+      return fb;
+    }catch(_){
+      // API 실패 → 폴백
+      const fb = await listByProbe(dir);
+      memCache.set(dir,{list:fb,etag:'',time:Date.now()});
+      const ls2=loadLS(); ls2[dir]={list:fb,etag:''}; saveLS(ls2);
+      return fb;
+    }
+  }
+
+  async function refreshInBG(dir, oldEtag){
+    try{
+      const { list, etag } = await listViaGithubAPI(dir);
+      if(!oldEtag || etag !== oldEtag){
+        memCache.set(dir,{list,etag,time:Date.now()});
+        const ls = loadLS(); ls[dir]={list,etag}; saveLS(ls);
+        // 화면에 그 디렉토리 열려있다면 최신화
+        if(current && current.dir===dir) renderGallery(list, /*keepIndex=*/true);
+      }
+    }catch(_){}
+  }
+
+  // === 썸네일 렌더 ===
+  const ph='data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==';
+  const thumbIO='IntersectionObserver' in window ? new IntersectionObserver(entries=>{
+    for(const e of entries){
+      if(e.isIntersecting){
+        const img=e.target;
+        if(img.dataset.src){ img.src=img.dataset.src; img.removeAttribute('data-src'); }
+        thumbIO.unobserve(img);
+      }
+    }
+  }, {root:strip, rootMargin:'200px 0px', threshold:0.01}) : null;
+
+  let imgs=[], shown=0, ths=[], idx=0;
+  let isLoadingBatch=false;
+
+  function ensureThumbVisible(k){
+    const t=ths[k]; if(!t) return;
+    const tRect=t.getBoundingClientRect(), sRect=strip.getBoundingClientRect();
+    if(tRect.left < sRect.left){ strip.scrollLeft += (tRect.left - sRect.left) - 10; }
+    if(tRect.right> sRect.right){ strip.scrollLeft += (tRect.right- sRect.right)+ 10; }
+  }
+
+  function preloadNeighbor(center){
+    for(let d=1; d<=PREFETCH_NEIGHBOR; d++){
+      const ns=[center-d, center+d];
+      ns.forEach(n=>{
+        if(n<0||n>=imgs.length) return;
+        const url=imgs[n];
+        const im=new Image(); im.decoding='async'; im.loading='eager'; im.src=url;
+      });
+    }
+  }
+
+  function highlight(){ ths.forEach((el,k)=>el.classList.toggle('active',k===idx)); }
+
+  function show(i){
+    if(!imgs.length) return;
+    idx=(i+imgs.length)%imgs.length;
+    const src=imgs[idx];
+    if(main.src!==src) main.src=src;
+    highlight(); ensureThumbVisible(idx); preloadNeighbor(idx);
+    // 아직 그려지지 않은 끝 근처면 다음 배치 미리 붙임
+    if(idx >= shown-1) appendBatch();
+  }
+
+  function appendBatch(){
+  if(isLoadingBatch || shown>=imgs.length) return;
+  isLoadingBatch=true;
+  const end=Math.min(shown+BATCH, imgs.length);
+  const frag=document.createDocumentFragment();
+  for(let i=shown;i<end;i++){
+    const src=imgs[i]; // GIF 경로
+    const btn=document.createElement('button');
+    btn.className='amg_th'; btn.dataset.idx=i; btn.type='button';
+    btn.addEventListener('mousedown',e=>e.preventDefault());
+    btn.onclick=()=>show(i);
+
+    const im=document.createElement('img');
+    im.alt=`썸네일 ${i+1}`;
+    im.loading='lazy';
+    im.decoding='async';
+
+    // PNG 우선: images → thumbs, 확장자 .gif → .png
+    const thumb = src.replace('images','thumbs').replace(/\.gif$/i, '.png');
+    im.src = thumb;
+    // PNG 없으면 GIF로 폴백
+    im.onerror = () => { im.src = src; };
+
+    btn.appendChild(im);
+    frag.appendChild(btn);
+    ths.push(btn);
+  }
+  strip.appendChild(frag);
+  shown=end;
+  isLoadingBatch=false;
+}
+
+
+  function renderGallery(list, keepIndex=false){
+    imgs=list; shown=0; ths=[]; if(!keepIndex) idx=0;
+    strip.innerHTML='';
+    if(!imgs.length){
+      strip.innerHTML='<div class="empty">이미지 없음</div>';
+      main.removeAttribute('src'); prev.style.display=next.style.display='none';
+      return;
+    }
+    prev.style.display=next.style.display='';
+    appendBatch();
+    show(keepIndex ? idx : 0);
+  }
+
+  // 가로 스크롤 끝 근처면 자동 추가
+  strip.addEventListener('scroll', ()=>{
+    if(shown>=imgs.length || isLoadingBatch) return;
+    const nearEnd = strip.scrollLeft + strip.clientWidth >= strip.scrollWidth - 80;
+    if(nearEnd) appendBatch();
+  }, {passive:true});
+
+  prev.onclick=()=>show(idx-1);
+  next.onclick=()=>show(idx+1);
+
+  // 스와이프
+  let startX=null;
+  main.addEventListener('touchstart',e=>{ startX=e.touches[0].clientX; },{passive:true});
+  main.addEventListener('touchend',e=>{
+    if(startX===null) return;
+    const dx=e.changedTouches[0].clientX-startX;
+    if(Math.abs(dx)>40) show(idx+(dx<0?1:-1));
+    startX=null;
+  },{passive:true});
+
+  // 탭 전환
+  let current=null; // {label, dir, el}
+  async function activateTab(tab){
+    if(current?.dir===tab.dir){
+      // 같은 탭 다시 누르면 즉시 캐시 표시
+      const cached = memCache.get(tab.dir)?.list || loadLS()[tab.dir]?.list || [];
+      if(cached.length) renderGallery(cached, /*keepIndex=*/true);
+      return;
+    }
+    tabsEl.querySelectorAll('.tab').forEach(el=>el.classList.remove('active'));
+    tab.el.classList.add('active');
+    current=tab;
+
+    // 1) 캐시 즉시 사용
+    const first = memCache.get(tab.dir)?.list || loadLS()[tab.dir]?.list || [];
+    if(first.length) renderGallery(first);
+
+    // 2) 최신 목록 확보 (API→폴백)
+    const list = await getImages(tab.dir);
+    renderGallery(list);
+
+    // 3) 다음/이전 탭 워밍업(첫 이미지 1장만)
+    warmNeighbors(tab);
+  }
+
+  // 다음/이전 탭 사전 프리페치
+  function warmNeighbors(tab){
+    const idxTab = GALLERIES.findIndex(g=>g.dir===tab.dir);
+    [idxTab-1, idxTab+1].forEach(async ti=>{
+      if(ti<0 || ti>=GALLERIES.length) return;
+      const t = GALLERIES[ti];
+      // 이미 캐시돼 있으면 스킵
+      if(memCache.has(t.dir)) return;
+      // 목록만 빠르게 가져오고 첫 1장만 예열
+      const list = await getImages(t.dir);
+      if(list && list[0]){
+        const im = new Image();
+        im.decoding='async'; im.loading='eager'; im.src=list[0];
+      }
+    });
+  }
+
+  // 탭 버튼 생성
+  GALLERIES.forEach(g=>{
+    const btn=document.createElement('div');
+    btn.className='tab'; btn.textContent=g.label;
+    btn.onclick=()=>activateTab({...g, el:btn});
+    g.el=btn; tabsEl.appendChild(btn);
+  });
+
+  // 첫 탭
+  activateTab({...GALLERIES[0], el:tabsEl.firstChild});
+})();
+  // 갤러리 이미지 우클릭 방지
+document.addEventListener('DOMContentLoaded', ()=>{
+  document.querySelectorAll('#amg_main, #amg_strip img').forEach(img=>{
+    img.addEventListener('contextmenu', e=> e.preventDefault());
+  });
+});
+// 우클릭/드래그 전역 위임 (컨테이너 기준으로 모두 차단)
+document.addEventListener('contextmenu', (e) => {
+  const t = e.target;
+  if (t && (t.closest('.stage') || t.closest('#amg_strip'))) {
+    e.preventDefault();
+  }
+}, true); // 캡처 단계에서 선차단
+
+document.addEventListener('dragstart', (e) => {
+  const t = e.target;
+  if (t && (t.closest('.stage') || t.closest('#amg_strip'))) {
+    e.preventDefault();
+  }
+}, true);
+
+
+</script>
+
+</body>
+</html>
