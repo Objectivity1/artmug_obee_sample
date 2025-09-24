@@ -6,12 +6,11 @@
 <title>오비 커미션</title>
 <link rel="preconnect" href="https://api.github.com">
 <style>
+  /* ▼ 반응형 썸네일용 변수 */
   :root{
     --gap:10px;
     --slots:8; /* 기본 8칸 */
   }
-
-  /* 반응형 썸네일 칼럼 수 */
   @media (max-width: 840px){ :root{ --slots:6; } }
   @media (max-width: 640px){ :root{ --slots:5; } }
   @media (max-width: 480px){ :root{ --slots:4; } }
@@ -19,57 +18,41 @@
   html,body{overscroll-behavior-y:none}
   body{font-family:system-ui,-apple-system,Segoe UI,Roboto,'Noto Sans KR','Malgun Gothic',Helvetica,Arial,sans-serif;margin:0}
   #amg{max-width:1000px;margin:24px auto;padding:16px}
-
   .tabs{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px;justify-content:center}
   .tab{border:1px solid #ddd;background:#fafafa;border-radius:999px;padding:8px 14px;cursor:pointer;user-select:none}
   .tab.active{background:#1d4ed8;color:#fff;border-color:#1d4ed8}
-
-  .stage{
-    position:relative;border:1px solid #eee;height:450px;border-radius:12px;padding:12px;
-    display:flex;align-items:center;justify-content:center;text-align:center;
-    /* 스와이프 제스처 품질 개선: 세로 스크롤은 브라우저, 가로 드래그는 우리 처리 */
-    touch-action: pan-y;
-    user-select: none;
-  }
-
-  #amg_main{
-    max-width:100%;max-height:100%;width:auto;height:auto;display:inline-block;border-radius:8px;
-    /* 이미지 자체는 드래그/우클릭 방지 */
-    -webkit-user-drag:none; user-drag:none; -webkit-touch-callout:none; user-select:none;
-    object-fit:contain;
-  }
-
-  .nav{
-    position:absolute;top:50%;transform:translateY(-50%);width:40px;height:40px;border-radius:999px;border:0;
-    background:rgba(0,0,0,.45);color:#fff;font-size:20px;cursor:pointer;z-index:10;display:flex;align-items:center;justify-content:center
-  }
+  .stage{position:relative;border:1px solid #eee;height:450px;border-radius:12px;padding:12px;display:flex;align-items:center;justify-content:center;text-align:center}
+  #amg_main{max-width:100%;max-height:100%;width:auto;height:auto;display:inline-block;border-radius:8px;pointer-events:none;object-fit:contain}
+  .nav{position:absolute;top:50%;transform:translateY(-50%);width:40px;height:40px;border-radius:999px;border:0;background:rgba(0,0,0,.45);color:#fff;font-size:20px;cursor:pointer;z-index:10;display:flex;align-items:center;justify-content:center}
   #amg_prev{left:8px} #amg_next{right:8px}
 
+  /* ▼ 반응형 썸네일 스트립 */
   #amg_strip{
     margin-top:10px;display:flex;gap:var(--gap);overflow-x:auto;-webkit-overflow-scrolling:touch;
     padding:6px 2px;overscroll-behavior:contain;touch-action:pan-x;scrollbar-gutter:stable both-edges;
-    scroll-snap-type:x proximity;
   }
-
-  /* 반응형 썸네일: N칸을 일정 간격으로 */
+  /* 칸 수를 화면폭에 맞춰 자동 계산 */
   .amg_th{
     flex:0 0 calc((100% - (var(--slots) - 1) * var(--gap)) / var(--slots));
     border:2px solid #ddd;border-radius:8px;padding:0;background:#fff;cursor:pointer;outline:none;
-    scroll-snap-align:start;
   }
   .amg_th img{
     display:block;width:100%;
-    /* 정사각형 비율로 깔끔하게, 이미지 크롭은 cover */
-    aspect-ratio:1/1; height:auto; object-fit:cover;border-radius:6px;
-    -webkit-user-drag:none; user-drag:none; pointer-events:none;
+    /* 정사각형 비율로 깔끔하게, 크롭은 cover */
+    aspect-ratio:1/1; height:auto; object-fit:cover;border-radius:6px;pointer-events:none;
   }
   .amg_th.active{border-color:#7aa7ff}
 
   .empty{color:#888;text-align:center;padding:20px 0}
+  .sentinel{flex:0 0 1px;width:1px;height:1px}
 
-  /* 이미지 드래그/우클릭 전역 방지 보강 */
   #amg_main,
-  #amg_strip img {-webkit-user-drag:none; user-drag:none; -webkit-touch-callout:none; user-select:none;}
+  #amg_strip img {
+    -webkit-user-drag: none;
+    user-drag: none;
+    -webkit-touch-callout: none; /* iOS 길게 누르기 메뉴 막기 */
+    user-select: none;
+  }
 </style>
 </head>
 <body>
@@ -78,13 +61,14 @@
   <!-- 타입 탭버튼 -->
   <div class="tabs" id="tabs"></div>
 
-  <div class="stage" id="amg_stage">
+  <div class="stage">
     <img id="amg_main" alt="미리보기" fetchpriority="high" decoding="async">
     <button id="amg_prev" class="nav" type="button" aria-label="이전">‹</button>
     <button id="amg_next" class="nav" type="button" aria-label="다음">›</button>
   </div>
 
   <div id="amg_strip"></div>
+
 
  </div>
 
@@ -105,7 +89,6 @@
 
   // DOM
   const tabsEl=document.getElementById('tabs');
-  const stage=document.getElementById('amg_stage');
   const main=document.getElementById('amg_main');
   const prev=document.getElementById('amg_prev');
   const next=document.getElementById('amg_next');
@@ -200,8 +183,6 @@
   }
 
   // === 썸네일 렌더 ===
-  const ph='data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==';
-
   let imgs=[], shown=0, ths=[], idx=0;
   let isLoadingBatch=false;
 
@@ -285,42 +266,9 @@
     if(nearEnd) appendBatch();
   }, {passive:true});
 
+  // 화살표 이동만 유지 (스와이프 없음)
   prev.onclick=()=>show(idx-1);
   next.onclick=()=>show(idx+1);
-
-  // === 스와이프(터치 + 마우스) : 이미지 클릭/홀드 후 좌우 드래그 ===
-  let pointerId=null;
-  let startX=null;
-  let moved=false;
-  const THRESHOLD=40;
-
-  stage.addEventListener('pointerdown', (e)=>{
-    pointerId = e.pointerId;
-    startX = e.clientX;
-    moved = false;
-    stage.setPointerCapture(pointerId);
-  });
-
-  stage.addEventListener('pointermove', (e)=>{
-    if(pointerId===null) return;
-    const dx = e.clientX - startX;
-    if(Math.abs(dx)>8) moved = true; // 소폭 드래그는 클릭으로 취급
-  });
-
-  function endSwipe(e){
-    if(pointerId===null) return;
-    const dx = e.clientX - startX;
-    if(Math.abs(dx) > THRESHOLD){
-      show(idx + (dx<0 ? 1 : -1));
-    }
-    // 종료 처리
-    try{ stage.releasePointerCapture(pointerId); }catch(_){}
-    pointerId=null; startX=null; moved=false;
-  }
-  stage.addEventListener('pointerup', endSwipe);
-  stage.addEventListener('pointercancel', endSwipe);
-  // 이미지 자체 클릭 방지(드래그 후 클릭 오작동 줄이기)
-  main.addEventListener('click', (e)=>{ if(moved) e.preventDefault(); }, true);
 
   // 탭 전환
   let current=null; // {label, dir, el}
@@ -343,6 +291,7 @@
     warmNeighbors(tab);
   }
 
+  // 다음/이전 탭 사전 프리페치
   function warmNeighbors(tab){
     const idxTab = GALLERIES.findIndex(g=>g.dir===tab.dir);
     [idxTab-1, idxTab+1].forEach(async ti=>{
@@ -369,11 +318,10 @@
   activateTab({...GALLERIES[0], el:tabsEl.firstChild});
 })();
 
-  // 갤러리 이미지 우클릭/드래그 방지(보강)
+  // 갤러리 이미지 우클릭 방지
 document.addEventListener('DOMContentLoaded', ()=>{
   document.querySelectorAll('#amg_main, #amg_strip img').forEach(img=>{
     img.addEventListener('contextmenu', e=> e.preventDefault());
-    img.addEventListener('dragstart', e=> e.preventDefault());
   });
 });
 // 우클릭/드래그 전역 위임 (컨테이너 기준으로 모두 차단)
@@ -382,7 +330,7 @@ document.addEventListener('contextmenu', (e) => {
   if (t && (t.closest('.stage') || t.closest('#amg_strip'))) {
     e.preventDefault();
   }
-}, true);
+}, true); // 캡처 단계에서 선차단
 document.addEventListener('dragstart', (e) => {
   const t = e.target;
   if (t && (t.closest('.stage') || t.closest('#amg_strip'))) {
